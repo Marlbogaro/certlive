@@ -29,6 +29,7 @@ Exemples d'utilisation::
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import signal
 import sys
@@ -36,6 +37,65 @@ from datetime import datetime, timezone
 from typing import IO, Iterable, Optional
 
 import certstream
+import certstream.core as _certstream_core
+
+
+def _patch_certstream_callbacks() -> None:
+    """Rend ``certstream`` compatible avec ``websocket-client`` >= 1.0.
+
+    À partir de la version 1.0 de ``websocket-client``, les callbacks
+    ``on_open``/``on_message``/``on_error`` reçoivent l'instance
+    ``WebSocketApp`` en premier argument. Or, ``certstream`` 1.11 utilise
+    encore les anciennes signatures (sans cet argument), ce qui produit
+    l'erreur::
+
+        error from callback ...CertStreamClient._on_error() takes 2
+        positional arguments but 3 were given
+
+    On réécrit les trois méthodes pour accepter les deux conventions.
+    """
+
+    client_cls = _certstream_core.CertStreamClient
+
+    # Ne patcher qu'une seule fois, même si ``main`` est appelé plusieurs fois.
+    if getattr(client_cls, "_certlive_patched", False):
+        return
+
+    logger = _certstream_core.certstream_logger
+
+    def _on_open(self, *_args):
+        logger.info("Connection established to CertStream! Listening for events...")
+        if self.on_open_handler:
+            self.on_open_handler()
+
+    def _on_message(self, *args):
+        # Compat: websocket-client >= 1.0 appelle on_message(ws, message);
+        # les versions antérieures appelaient on_message(message).
+        message = args[-1]
+        frame = json.loads(message)
+
+        if frame.get("message_type", None) == "heartbeat" and self.skip_heartbeats:
+            return
+
+        self.message_callback(frame, self._context)
+
+    def _on_error(self, *args):
+        # On prend toujours la dernière valeur positionnelle, qui correspond
+        # à l'exception quelle que soit la version de websocket-client.
+        ex = args[-1]
+        if isinstance(ex, KeyboardInterrupt):
+            raise ex
+        if self.on_error_handler:
+            self.on_error_handler(ex)
+        logger.error(
+            "Error connecting to CertStream - %s - Sleeping for a few seconds and trying again...",
+            ex,
+        )
+
+    client_cls._on_open = _on_open
+    client_cls._on_message = _on_message
+    client_cls._on_error = _on_error
+    client_cls._certlive_patched = True
 
 
 def _iter_domains(message: dict) -> Iterable[str]:
@@ -101,7 +161,7 @@ def _on_open() -> None:
     logging.info("Connecté au flux Certificate Transparency.")
 
 
-def _on_error(instance, exception) -> None:  # noqa: ANN001 - signature imposée
+def _on_error(exception) -> None:  # noqa: ANN001 - signature imposée
     logging.error("Erreur de connexion certstream: %s", exception)
 
 
@@ -152,6 +212,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         format="%(asctime)s [%(levelname)s] %(message)s",
         stream=sys.stderr,
     )
+
+    # Compatibilité avec websocket-client >= 1.0 (certstream 1.11 l'ignore).
+    _patch_certstream_callbacks()
 
     # Sortie Ctrl+C propre
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
