@@ -1,36 +1,13 @@
 #!/usr/bin/env python3
-"""certlive_direct - Flux en temps réel des domaines depuis les logs CT officiels.
+"""certlive - Real-time domain stream from CT logs (no certstream/Docker needed).
 
-Variante autonome de ``certlive.py``: au lieu de se connecter au flux
-WebSocket ``certstream`` (souvent inactif), ce script interroge
-directement les logs Certificate Transparency via leur API HTTP
-(RFC 6962). Il ne dépend ni de ``certstream`` ni de Docker.
+Queries Certificate Transparency logs directly via HTTP (RFC 6962).
 
-Fonctionnement:
+Usage::
 
-1. Récupère la liste officielle des logs CT de Google
-   (``https://www.gstatic.com/ct/log_list/v3/log_list.json``) et ne
-   conserve que les logs marqués ``usable`` dont l'intervalle temporel
-   couvre la date courante.
-2. Pour chaque log, interroge périodiquement ``get-sth`` pour connaître
-   la taille de l'arbre, puis télécharge les nouvelles entrées avec
-   ``get-entries``.
-3. Décode le ``MerkleTreeLeaf`` TLS, extrait le certificat (x509_entry)
-   ou le précertificat (precert_entry via ``extra_data``), puis liste
-   les domaines (CN + SAN DNS).
-
-Exemples::
-
-    # Temps réel (tous logs actifs)
-    python certlive_direct.py -o domains.txt
-
-    # Scan d'une journée UTC complète (un log conseillé par argument)
-    python certlive_direct.py --date 2026-04-17 \\
-        --logs https://ct.cloudflare.com/logs/nimbus2026/ -o hier.txt
-
-    # Plage personnalisée + continuer en temps réel après
-    python certlive_direct.py --since 2026-04-18T20:00Z --until 2026-04-18T21:00Z \\
-        --follow --progress --dedup --logs https://ct.cloudflare.com/logs/nimbus2026/
+    python certlive.py -o domains.txt
+    python certlive.py --date 2026-04-17 --logs https://ct.cloudflare.com/logs/nimbus2026/
+    python certlive.py --since 2026-04-18T20:00Z --until 2026-04-18T21:00Z
 """
 
 from __future__ import annotations
@@ -56,12 +33,12 @@ LOG_LIST_URL = "https://www.gstatic.com/ct/log_list/v3/log_list.json"
 DEFAULT_BATCH = 256
 DEFAULT_POLL_INTERVAL = 10.0
 HTTP_TIMEOUT = 20.0
-# Maximum Merge Delay standard pour les logs CT: 24 h en millisecondes.
+# CT log Maximum Merge Delay: 24 h in milliseconds.
 MMD_MS = 24 * 3600 * 1000
 
 
 def _parse_iso_datetime(value: str) -> datetime:
-    """Parse une date ISO-8601. Assume UTC si aucun fuseau n'est précisé."""
+    """Parse an ISO-8601 datetime string; assumes UTC if no timezone given."""
     normalized = value.strip().replace("Z", "+00:00")
     dt = datetime.fromisoformat(normalized)
     if dt.tzinfo is None:
@@ -70,7 +47,7 @@ def _parse_iso_datetime(value: str) -> datetime:
 
 
 def _decode_entry(entry: dict) -> Optional[tuple[bytes, int]]:
-    """Décode une entrée ``get-entries`` et renvoie ``(cert_der, timestamp_ms)``."""
+    """Decode a get-entries entry and return ``(cert_der, timestamp_ms)``."""
     try:
         leaf_input = base64.b64decode(entry.get("leaf_input", ""))
         extra_data = base64.b64decode(entry.get("extra_data", ""))
@@ -94,11 +71,10 @@ def _find_index_for_timestamp(
     stop_event: Optional[threading.Event] = None,
     label: str = "",
 ) -> int:
-    """Retourne le plus petit index ``i`` dans ``[0, tree_size)`` avec ``ts(i) >= target``.
+    """Return the smallest index ``i`` in ``[0, tree_size)`` where ``ts(i) >= target``.
 
-    Si ``target`` précède toutes les entrées, retourne 0. S'il leur est
-    postérieur, retourne ``tree_size``. Utilise une recherche binaire qui
-    lit une seule entrée par itération (~log2(tree_size) requêtes).
+    Returns 0 if target precedes all entries, or tree_size if it follows all.
+    Uses binary search (~log2(tree_size) requests).
     """
     if tree_size <= 0:
         return 0
@@ -112,8 +88,8 @@ def _find_index_for_timestamp(
         step += 1
         if label and step % 3 == 0:
             sys.stderr.write(
-                f"\r[{label}] recherche binaire {step}/{max_steps} "
-                f"(fenêtre {hi - lo:,} entrées)   "
+                f"\r[{label}] binary search {step}/{max_steps} "
+                f"(window {hi - lo:,} entries)   "
             )
             sys.stderr.flush()
         try:
@@ -146,13 +122,10 @@ def _find_index_for_timestamp(
 
 
 def _fetch_log_list(target_date: Optional[datetime] = None) -> list[dict]:
-    """Récupère la liste des logs CT.
+    """Fetch the CT log list, filtered by state and temporal interval.
 
-    - Si *target_date* est fourni (mode historique), on inclut tout log
-      ``usable``, ``retired`` ou ``readonly`` dont l'intervalle temporel
-      couvre cette date (ou qui n'a pas d'intervalle).
-    - Sinon (temps réel), on garde les logs ``usable`` dont l'intervalle
-      couvre la date du jour.
+    For historical mode (target_date given): include usable/retired/readonly logs
+    covering that date. For real-time mode: only usable logs covering today.
     """
     resp = requests.get(LOG_LIST_URL, timeout=HTTP_TIMEOUT)
     resp.raise_for_status()
@@ -192,9 +165,9 @@ def _fetch_log_list(target_date: Optional[datetime] = None) -> list[dict]:
 
 
 def _parse_merkle_leaf(leaf_input: bytes, extra_data: bytes) -> Optional[bytes]:
-    """Extrait le DER du certificat depuis un ``MerkleTreeLeaf`` TLS.
+    """Extract DER certificate bytes from a MerkleTreeLeaf TLS structure.
 
-    Renvoie ``None`` si la structure est malformée ou d'un type inconnu.
+    Returns None if the structure is malformed or of an unknown type.
     """
     # MerkleTreeLeaf: version(1) leaf_type(1) + TimestampedEntry
     # TimestampedEntry: timestamp(8) entry_type(2) signed_entry extensions(2+)
@@ -211,8 +184,7 @@ def _parse_merkle_leaf(leaf_input: bytes, extra_data: bytes) -> Optional[bytes]:
             return None
         return leaf_input[15:end]
     if entry_type == 1:
-        # precert_entry: le certificat signé (avec extension de poison) est
-        # le premier élément de extra_data (PreCert ASN.1Cert: uint24 len+DER).
+        # precert_entry: signed cert is the first element of extra_data (uint24 len + DER).
         if len(extra_data) < 3:
             return None
         cert_len = int.from_bytes(extra_data[0:3], "big")
@@ -224,7 +196,7 @@ def _parse_merkle_leaf(leaf_input: bytes, extra_data: bytes) -> Optional[bytes]:
 
 
 def _extract_cert_info(cert_der: bytes, timestamp_ms: int) -> Optional[dict]:
-    """Parse un certificat DER et renvoie CN+SAN+issuer."""
+    """Parse a DER certificate and return CN, SANs, and issuer."""
     try:
         cert = x509.load_der_x509_certificate(cert_der)
     except Exception:
@@ -270,7 +242,7 @@ def _extract_cert_info(cert_der: bytes, timestamp_ms: int) -> Optional[dict]:
 
 
 class _LogPoller(threading.Thread):
-    """Interroge un log CT et appelle ``callback`` pour chaque certificat."""
+    """Poll a CT log and invoke ``callback`` for each certificate."""
 
     def __init__(
         self,
@@ -303,9 +275,9 @@ class _LogPoller(threading.Thread):
         try:
             sth = self._get("ct/v1/get-sth")
             self._index = int(sth.get("tree_size", 0))
-            logging.info("[%s] connecté (tree_size=%d)", self._name, self._index)
+            logging.info("[%s] connected (tree_size=%d)", self._name, self._index)
         except Exception as exc:
-            logging.warning("[%s] échec initial get-sth: %s", self._name, exc)
+            logging.warning("[%s] initial get-sth failed: %s", self._name, exc)
             return
 
         while not self._stop_event.is_set():
@@ -352,8 +324,7 @@ class _LogPoller(threading.Thread):
 
 
 class _ProgressAggregator:
-    """Agrège la progression de plusieurs ``_HistoricalFetcher`` et dessine
-    une unique barre sur ``stderr`` pour ne pas noyer la sortie des domaines."""
+    """Aggregate progress from multiple ``_HistoricalFetcher`` and render a single progress bar on stderr."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -420,7 +391,7 @@ class _ProgressAggregator:
         eta = f"{eta_h:d}h{eta_m:02d}m" if eta_h else f"{eta_m:d}m{eta_s:02d}s"
         line = (
             f"\r|{bar}| {frac * 100:5.1f}% {done:,}/{total:,} "
-            f"@ {rate:,.0f}/s ETA {eta} — émis={emitted:,} "
+            f"@ {rate:,.0f}/s ETA {eta} — emitted={emitted:,} "
             f"logs={active}/{sources}   "
         )
         sys.stderr.write(line)
@@ -428,7 +399,7 @@ class _ProgressAggregator:
 
 
 class _HistoricalFetcher(threading.Thread):
-    """Scanne un log CT sur une plage de timestamps donnée puis se termine."""
+    """Scan a CT log over a given timestamp range, then exit."""
 
     def __init__(
         self,
@@ -467,10 +438,10 @@ class _HistoricalFetcher(threading.Thread):
             logging.error("[%s] get-sth: %s", self._name, exc)
             return
         if tree_size == 0:
-            logging.warning("[%s] log vide", self._name)
+            logging.warning("[%s] empty log", self._name)
             return
 
-        logging.info("[%s] recherche des bornes d'index…", self._name)
+        logging.info("[%s] resolving index bounds…", self._name)
         start_idx = _find_index_for_timestamp(
             self._session, self._url,
             max(0, self._start_ts_ms - MMD_MS), tree_size, self._stop_event,
@@ -485,13 +456,13 @@ class _HistoricalFetcher(threading.Thread):
             return
         if start_idx >= end_idx:
             logging.warning(
-                "[%s] aucune entrée ne correspond à la plage demandée.",
+                "[%s] no entries match the requested range.",
                 self._name,
             )
             return
         total = end_idx - start_idx
         logging.info(
-            "[%s] plage index [%d, %d) — %d entrées à parcourir",
+            "[%s] index range [%d, %d) — %d entries to scan",
             self._name, start_idx, end_idx, total,
         )
         if self._progress is not None:
@@ -508,7 +479,7 @@ class _HistoricalFetcher(threading.Thread):
                 continue
             entries = data.get("entries") or []
             if not entries:
-                logging.warning("[%s] réponse vide à l'index %d", self._name, idx)
+                logging.warning("[%s] empty response at index %d", self._name, idx)
                 break
             for entry in entries:
                 decoded = _decode_entry(entry)
@@ -533,20 +504,20 @@ class _HistoricalFetcher(threading.Thread):
             self._progress.finish(self._name)
 
         logging.info(
-            "[%s] terminé — %d certificats scannés, %d avec domaines émis",
+            "[%s] done — %d certs scanned, %d with domains emitted",
             self._name, self.scanned, self.emitted,
         )
 
 
 class _DiskDedup:
-    """Dé-duplication sur disque via SQLite (quasi zéro RAM)."""
+    """Disk-based deduplication via SQLite (near-zero RAM usage)."""
 
     def __init__(self) -> None:
         self._fd, self._path = tempfile.mkstemp(suffix=".db", prefix="certlive_")
         os.close(self._fd)
         self._local = threading.local()
         self._lock = threading.Lock()
-        # Créer la table dans le thread principal
+        # Create table in the main thread
         conn = self._conn()
         conn.execute("CREATE TABLE seen (domain TEXT PRIMARY KEY)")
         conn.execute("PRAGMA journal_mode=WAL")
@@ -561,7 +532,7 @@ class _DiskDedup:
         return c
 
     def add_if_new(self, domain: str) -> bool:
-        """Retourne ``True`` si le domaine est nouveau (et l'insère)."""
+        """Return ``True`` if the domain is new (and insert it)."""
         conn = self._conn()
         with self._lock:
             try:
@@ -582,7 +553,7 @@ def _wrap_dedup(
     callback: Callable[[dict, str], None],
     dedup: _DiskDedup,
 ) -> Callable[[dict, str], None]:
-    """Enveloppe un callback pour éviter d'émettre deux fois le même domaine."""
+    """Wrap a callback to skip already-emitted domains."""
 
     def wrapped(info: dict, source: str) -> None:
         fresh = [d for d in info["domains"] if dedup.add_if_new(d)]
@@ -625,45 +596,39 @@ def _build_callback(
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="certlive",
-        description=(
-            "Flux temps réel des domaines depuis les logs Certificate "
-            "Transparency officiels (sans dépendance certstream)."
-        ),
+        description="Real-time domain stream from CT logs (no certstream dependency).",
     )
     parser.add_argument(
-        "-o", "--output", metavar="FICHIER",
-        help="Fichier dans lequel ajouter les domaines (un par ligne).",
+        "-o", "--output", metavar="FILE",
+        help="File to append domains to (one per line).",
     )
     parser.add_argument(
         "-k", "--keyword",
-        help="Ne garder que les domaines contenant ce mot-clé (insensible à la casse).",
+        help="Only keep domains containing this keyword (case-insensitive).",
     )
     parser.add_argument(
         "--no-wildcard", action="store_true",
-        help="Ignorer les domaines wildcard (*.exemple.com).",
+        help="Skip wildcard domains (*.example.com).",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true",
-        help="Afficher l'horodatage, la source et l'émetteur en plus du domaine.",
+        help="Also print timestamp, source, and issuer.",
     )
     parser.add_argument(
         "--logs", metavar="URL[,URL...]",
-        help=(
-            "URLs de logs CT à utiliser (séparées par des virgules). "
-            "Par défaut: tous les logs 'usable' listés par Google."
-        ),
+        help="CT log URLs to use (comma-separated). Default: all usable Google-listed logs.",
     )
     parser.add_argument(
         "--date", metavar="YYYY-MM-DD",
-        help="Scanner une journée UTC complète (ex: hier).",
+        help="Scan a full UTC day (e.g. yesterday).",
     )
     parser.add_argument(
         "--since", metavar="ISO8601",
-        help="Début (inclusif) de la plage à scanner, ex: 2026-04-17T00:00Z.",
+        help="Range start (inclusive), e.g. 2026-04-17T00:00Z.",
     )
     parser.add_argument(
         "--until", metavar="ISO8601",
-        help="Fin (exclusive) de la plage à scanner.",
+        help="Range end (exclusive).",
     )
     return parser.parse_args(argv)
 
@@ -675,9 +640,9 @@ def _resolve_logs(args: argparse.Namespace, target_date: Optional[datetime] = No
             {"url": u.rstrip("/") + "/", "name": u, "operator": "custom"}
             for u in urls
         ]
-    logging.info("Récupération de la liste des logs CT…")
+    logging.info("Fetching CT log list…")
     logs = _fetch_log_list(target_date=target_date)
-    logging.info("%d logs CT trouvés.", len(logs))
+    logging.info("%d CT logs found.", len(logs))
     return logs
 
 
@@ -689,17 +654,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         stream=sys.stderr,
     )
 
-    # --- Résoudre la plage historique d'abord (besoin de la date cible pour les logs) ---
+    # Resolve the historical range first (need target date to filter logs)
     historical_range: Optional[tuple[int, int]] = None
     target_date: Optional[datetime] = None
     if args.date and (args.since or args.until):
-        logging.error("--date est incompatible avec --since/--until.")
+        logging.error("--date is incompatible with --since/--until.")
         return 2
     if args.date:
         try:
             day = _parse_iso_datetime(args.date + "T00:00:00Z")
         except ValueError as exc:
-            logging.error("--date invalide: %s", exc)
+            logging.error("invalid --date: %s", exc)
             return 2
         start_dt = day
         end_dt = day + timedelta(days=1)
@@ -710,16 +675,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
     elif args.since or args.until:
         if not (args.since and args.until):
-            logging.error("--since et --until doivent être utilisés ensemble.")
+            logging.error("--since and --until must be used together.")
             return 2
         try:
             start_dt = _parse_iso_datetime(args.since)
             end_dt = _parse_iso_datetime(args.until)
         except ValueError as exc:
-            logging.error("date ISO invalide: %s", exc)
+            logging.error("invalid ISO date: %s", exc)
             return 2
         if end_dt <= start_dt:
-            logging.error("--until doit être postérieur à --since.")
+            logging.error("--until must be later than --since.")
             return 2
         target_date = start_dt
         historical_range = (
@@ -730,11 +695,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         logs = _resolve_logs(args, target_date=target_date)
     except requests.RequestException as exc:
-        logging.error("Impossible de récupérer la liste des logs CT: %s", exc)
+        logging.error("Failed to fetch CT log list: %s", exc)
         return 1
 
     if not logs:
-        logging.error("Aucun log CT disponible.")
+        logging.error("No CT logs available.")
         return 1
 
     stop_event = threading.Event()
@@ -757,7 +722,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if historical_range is not None:
             start_ms, end_ms = historical_range
             logging.info(
-                "Mode historique : %s → %s (UTC) sur %d log(s)",
+                "Historical mode: %s → %s (UTC) across %d log(s)",
                 datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).isoformat(),
                 datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).isoformat(),
                 len(logs),
@@ -784,7 +749,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             total_scanned = sum(f.scanned for f in fetchers)
             total_emitted = sum(f.emitted for f in fetchers)
             logging.info(
-                "Scan historique terminé : %d certificats scannés, %d émis.",
+                "Historical scan done: %d certs scanned, %d emitted.",
                 total_scanned, total_emitted,
             )
             return 0
@@ -800,11 +765,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         for poller in pollers:
             poller.start()
 
-        logging.info("%d pollers démarrés. Ctrl+C pour quitter.", len(pollers))
+        logging.info("%d pollers started. Press Ctrl+C to quit.", len(pollers))
         while not stop_event.is_set():
             stop_event.wait(1.0)
 
-        logging.info("Arrêt en cours…")
+        logging.info("Shutting down…")
         for poller in pollers:
             poller.join(timeout=2.0)
     finally:
