@@ -1,10 +1,10 @@
 # certlive
 
-`certlive` est un petit outil en Python qui se connecte au flux public
-[certstream](https://certstream.calidog.io/) (agrégateur des logs
-[Certificate Transparency](https://certificate.transparency.dev/)) et
-affiche en temps réel la liste des domaines associés à **chaque
-certificat TLS nouvellement émis**, quel que soit son type (DV, OV, EV,
+`certlive` is a small Python tool that connects to the public
+[certstream](https://certstream.calidog.io/) feed (an aggregator of
+[Certificate Transparency](https://certificate.transparency.dev/) logs)
+and displays in real time the list of domains associated with **each
+newly issued TLS certificate**, regardless of its type (DV, OV, EV,
 wildcard, Let's Encrypt, DigiCert, etc.).
 
 ## Installation
@@ -17,48 +17,49 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Utilisation
+## Usage
 
 ```bash
-# Afficher tous les domaines en continu
+# Continuously display all domains
 python certlive.py
 
-# Enregistrer les domaines dans un fichier (append)
+# Save domains to a file (append)
 python certlive.py -o domains.txt
 
-# Filtrer sur un mot-clé (insensible à la casse)
+# Filter by keyword (case-insensitive)
 python certlive.py -k paypal
 
-# Ignorer les domaines wildcard (*.exemple.com)
+# Ignore wildcard domains (*.example.com)
 python certlive.py --no-wildcard
 
-# Mode verbeux : horodatage + émetteur
+# Verbose mode: timestamp + issuer
 python certlive.py -v
 ```
 
-Arrêter avec `Ctrl+C`.
+Stop with `Ctrl+C`.
 
 ### Options
 
 | Option | Description |
 |---|---|
-| `-o`, `--output FICHIER` | Ajoute chaque domaine dans un fichier (un par ligne). |
-| `-k`, `--keyword MOT` | Ne garde que les domaines contenant ce mot-clé. |
-| `--no-wildcard` | Ignore les domaines commençant par `*.`. |
-| `-v`, `--verbose` | Affiche aussi l'horodatage et l'émetteur du certificat. |
-| `-u`, `--url URL` | URL du serveur certstream (défaut: `wss://certstream.calidog.io/`). |
+| `-o`, `--output FILE` | Append each domain to a file (one per line). |
+| `-k`, `--keyword WORD` | Only keep domains containing this keyword. |
+| `--no-wildcard` | Ignore domains starting with `*.`. |
+| `-v`, `--verbose` | Also display the timestamp and the certificate issuer. |
+| `-u`, `--url URL` | certstream server URL (default: `wss://certstream.calidog.io/`). |
 
-## Fonctionnement
+## How it works
 
-Chaque nouveau certificat émis publiquement est publié dans les logs
-Certificate Transparency. Le service [certstream](https://certstream.calidog.io/)
-agrège ces logs et les diffuse via WebSocket. `certlive` :
+Every newly issued public certificate is published to Certificate
+Transparency logs. The [certstream](https://certstream.calidog.io/)
+service aggregates these logs and broadcasts them over WebSocket.
+`certlive`:
 
-1. Ouvre une connexion WebSocket vers le serveur certstream.
-2. Reçoit les événements `certificate_update`.
-3. Extrait la liste des domaines (`CN` + `SAN`) de chaque certificat.
-4. Applique les filtres éventuels et affiche / enregistre les domaines.
+1. Opens a WebSocket connection to the certstream server.
+2. Receives `certificate_update` events.
+3. Extracts the list of domains (`CN` + `SAN`) from each certificate.
+4. Applies any filters and then displays / saves the domains.
 
-## Licence
+## License
 
-Voir [LICENSE](LICENSE).
+See [LICENSE](LICENSE).

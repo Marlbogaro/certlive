@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
-"""certlive - Flux en temps réel des domaines présents dans les certificats TLS.
+"""certlive - Real-time feed of domains found in TLS certificates.
 
-Ce script se connecte au flux public `certstream` (agrégateur des logs
-Certificate Transparency) et affiche, pour chaque certificat nouvellement
-émis, la liste des domaines (CN + SAN) qui lui sont associés, quel que
-soit le type de certificat (DV, OV, EV, wildcard, etc.).
+This script connects to the public `certstream` feed (an aggregator of
+Certificate Transparency logs) and displays, for each newly issued
+certificate, the list of domains (CN + SAN) associated with it,
+regardless of the certificate type (DV, OV, EV, wildcard, etc.).
 
-Inspiré de https://certstream.calidog.io/.
+Inspired by https://certstream.calidog.io/.
 
-Exemples d'utilisation::
+Usage examples::
 
-    # Afficher tous les domaines en continu
+    # Continuously display all domains
     python certlive.py
 
-    # Enregistrer les domaines dans un fichier
+    # Save domains to a file
     python certlive.py -o domains.txt
 
-    # Filtrer sur un mot-clé (sous-chaîne, insensible à la casse)
+    # Filter by keyword (substring, case-insensitive)
     python certlive.py -k paypal
 
-    # Ignorer les domaines wildcard (*.example.com)
+    # Ignore wildcard domains (*.example.com)
     python certlive.py --no-wildcard
 
-    # Afficher aussi l'émetteur du certificat
+    # Also display the certificate issuer
     python certlive.py -v
 """
 
@@ -41,23 +41,23 @@ import certstream.core as _certstream_core
 
 
 def _patch_certstream_callbacks() -> None:
-    """Rend ``certstream`` compatible avec ``websocket-client`` >= 1.0.
+    """Make ``certstream`` compatible with ``websocket-client`` >= 1.0.
 
-    À partir de la version 1.0 de ``websocket-client``, les callbacks
-    ``on_open``/``on_message``/``on_error`` reçoivent l'instance
-    ``WebSocketApp`` en premier argument. Or, ``certstream`` 1.11 utilise
-    encore les anciennes signatures (sans cet argument), ce qui produit
-    l'erreur::
+    Starting with version 1.0 of ``websocket-client``, the
+    ``on_open``/``on_message``/``on_error`` callbacks receive the
+    ``WebSocketApp`` instance as their first argument. However,
+    ``certstream`` 1.11 still uses the old signatures (without this
+    argument), which produces the error::
 
         error from callback ...CertStreamClient._on_error() takes 2
         positional arguments but 3 were given
 
-    On réécrit les trois méthodes pour accepter les deux conventions.
+    We rewrite the three methods to accept both conventions.
     """
 
     client_cls = _certstream_core.CertStreamClient
 
-    # Ne patcher qu'une seule fois, même si ``main`` est appelé plusieurs fois.
+    # Only patch once, even if ``main`` is called several times.
     if getattr(client_cls, "_certlive_patched", False):
         return
 
@@ -69,8 +69,8 @@ def _patch_certstream_callbacks() -> None:
             self.on_open_handler()
 
     def _on_message(self, *args):
-        # Compat: websocket-client >= 1.0 appelle on_message(ws, message);
-        # les versions antérieures appelaient on_message(message).
+        # Compat: websocket-client >= 1.0 calls on_message(ws, message);
+        # earlier versions called on_message(message).
         message = args[-1]
         frame = json.loads(message)
 
@@ -80,8 +80,8 @@ def _patch_certstream_callbacks() -> None:
         self.message_callback(frame, self._context)
 
     def _on_error(self, *args):
-        # On prend toujours la dernière valeur positionnelle, qui correspond
-        # à l'exception quelle que soit la version de websocket-client.
+        # We always take the last positional value, which corresponds to
+        # the exception regardless of the websocket-client version.
         ex = args[-1]
         if isinstance(ex, KeyboardInterrupt):
             raise ex
@@ -99,14 +99,14 @@ def _patch_certstream_callbacks() -> None:
 
 
 def _iter_domains(message: dict) -> Iterable[str]:
-    """Retourne tous les domaines (CN + SAN) d'un message certstream."""
+    """Return all domains (CN + SAN) from a certstream message."""
     leaf = message.get("data", {}).get("leaf_cert", {})
     all_domains = list(leaf.get("all_domains", []) or [])
     if not all_domains:
         subject_cn = (leaf.get("subject") or {}).get("CN")
         if subject_cn:
             all_domains.append(subject_cn)
-    # Dé-duplication tout en préservant l'ordre d'apparition
+    # Deduplicate while preserving insertion order
     seen: set[str] = set()
     for domain in all_domains:
         if domain and domain not in seen:
@@ -120,7 +120,7 @@ def _build_handler(
     include_wildcard: bool,
     verbose: bool,
 ):
-    """Construit le callback appelé par certstream pour chaque message."""
+    """Build the callback invoked by certstream for each message."""
     keyword_lower = keyword.lower() if keyword else None
 
     def handler(message: dict, context: dict) -> None:  # noqa: ARG001
@@ -158,48 +158,48 @@ def _build_handler(
 
 
 def _on_open() -> None:
-    logging.info("Connecté au flux Certificate Transparency.")
+    logging.info("Connected to the Certificate Transparency feed.")
 
 
-def _on_error(exception) -> None:  # noqa: ANN001 - signature imposée
-    logging.error("Erreur de connexion certstream: %s", exception)
+def _on_error(exception) -> None:  # noqa: ANN001 - signature imposed
+    logging.error("certstream connection error: %s", exception)
 
 
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="certlive",
         description=(
-            "Récupère en temps réel les domaines associés aux certificats "
-            "TLS nouvellement émis (via les logs Certificate Transparency)."
+            "Fetch in real time the domains associated with newly issued "
+            "TLS certificates (via Certificate Transparency logs)."
         ),
     )
     parser.add_argument(
         "-o",
         "--output",
-        metavar="FICHIER",
-        help="Fichier dans lequel ajouter les domaines (un par ligne).",
+        metavar="FILE",
+        help="File to append domains to (one per line).",
     )
     parser.add_argument(
         "-k",
         "--keyword",
-        help="Ne garder que les domaines contenant ce mot-clé (insensible à la casse).",
+        help="Only keep domains containing this keyword (case-insensitive).",
     )
     parser.add_argument(
         "--no-wildcard",
         action="store_true",
-        help="Ignorer les domaines wildcard (*.exemple.com).",
+        help="Ignore wildcard domains (*.example.com).",
     )
     parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
-        help="Afficher l'horodatage et l'émetteur en plus du domaine.",
+        help="Also display the timestamp and issuer in addition to the domain.",
     )
     parser.add_argument(
         "-u",
         "--url",
         default="wss://certstream.calidog.io/",
-        help="URL du serveur certstream à utiliser (défaut: %(default)s).",
+        help="certstream server URL to use (default: %(default)s).",
     )
     return parser.parse_args(argv)
 
@@ -213,10 +213,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         stream=sys.stderr,
     )
 
-    # Compatibilité avec websocket-client >= 1.0 (certstream 1.11 l'ignore).
+    # Compatibility with websocket-client >= 1.0 (certstream 1.11 ignores it).
     _patch_certstream_callbacks()
 
-    # Sortie Ctrl+C propre
+    # Clean Ctrl+C exit
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 
     output_fp: Optional[IO[str]] = None
